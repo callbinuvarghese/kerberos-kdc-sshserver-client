@@ -1,0 +1,799 @@
+https://www.confluent.io/blog/containerized-testing-with-kerberos-and-ssh/
+
+cd source/kerberos
+git clone https://github.com/dosvath/kerberos-containers
+cd kerberos-containers
+➜  kerberos-containers git:(master) ls
+README.md      kdc-server     kdc-ssh-server ssh-container
+
+
+KDC - STARTUP
+==============
+➜  kerberos-containers git:(master) cd kdc-server
+
+➜  kdc-server git:(master) cat Dockerfile
+FROM debian:jessie
+
+EXPOSE 749 88/udp
+
+ENV DEBIAN_FRONTEND noninteractive
+RUN apt-get -qq update
+RUN apt-get -qq install locales krb5-kdc krb5-admin-server
+RUN apt-get -qq install vim
+RUN apt-get -qq clean
+
+ENV REALM ${REALM:-EXAMPLE.COM}
+ENV SUPPORTED_ENCRYPTION_TYPES ${SUPPORTED_ENCRYPTION_TYPES:-aes256-cts-hmac-sha1-96:normal}
+ENV KADMIN_PRINCIPAL ${KADMIN_PRINCIPAL:-kadmin/admin}
+ENV KADMIN_PASSWORD ${KADMIN_PASSWORD:-adminpassword}
+
+COPY init-script.sh /tmp/
+CMD /tmp/init-script.sh
+
+➜  kdc-server git:(master) cat docker-compose.yml
+# Based on https://github.com/ist-dsi/docker-kerberos
+version: "2"
+services:
+  kdc-server:
+    hostname: 'kdc-server'
+    build: .
+    volumes:
+      # This is needed otherwise there won't be enough entropy to generate a new kerberos realm
+      - /dev/urandom:/dev/random
+    ports:
+      - "749:749"
+      - "88:88/udp"
+
+➜  kdc-server git:(master) cat init-script.sh
+# Based on https://github.com/ist-dsi/docker-kerberos/blob/master/kdc-kadmin/init-script.sh
+# by Simão Martins and David Duarte
+#!/bin/bash
+echo "==================================================================================="
+echo "==== Kerberos KDC and Kadmin ======================================================"
+echo "==================================================================================="
+KADMIN_PRINCIPAL_FULL=$KADMIN_PRINCIPAL@$REALM
+
+echo "REALM: $REALM"
+echo "KADMIN_PRINCIPAL_FULL: $KADMIN_PRINCIPAL_FULL"
+echo "KADMIN_PASSWORD: $KADMIN_PASSWORD"
+echo ""
+
+echo "==================================================================================="
+echo "==== /etc/krb5.conf ==============================================================="
+echo "==================================================================================="
+KDC_KADMIN_SERVER=$(hostname -f)
+tee /etc/krb5.conf <<EOF
+[libdefaults]
+	default_realm = $REALM
+
+[realms]
+	$REALM = {
+		kdc_ports = 88,750
+		kadmind_port = 749
+		kdc = $KDC_KADMIN_SERVER
+		admin_server = $KDC_KADMIN_SERVER
+	}
+EOF
+echo ""
+
+echo "==================================================================================="
+echo "==== /etc/krb5kdc/kdc.conf ========================================================"
+echo "==================================================================================="
+tee /etc/krb5kdc/kdc.conf <<EOF
+[realms]
+	$REALM = {
+		acl_file = /etc/krb5kdc/kadm5.acl
+		max_renewable_life = 7d 0h 0m 0s
+		supported_enctypes = $SUPPORTED_ENCRYPTION_TYPES
+		default_principal_flags = +preauth
+	}
+EOF
+echo ""
+
+echo "==================================================================================="
+echo "==== /etc/krb5kdc/kadm5.acl ======================================================="
+echo "==================================================================================="
+tee /etc/krb5kdc/kadm5.acl <<EOF
+$KADMIN_PRINCIPAL_FULL *
+noPermissions@$REALM X
+EOF
+echo ""
+
+echo "==================================================================================="
+echo "==== Creating realm ==============================================================="
+echo "==================================================================================="
+MASTER_PASSWORD=$(tr -cd '[:alnum:]' < /dev/urandom | fold -w30 | head -n1)
+# This command also starts the krb5-kdc and krb5-admin-server services
+krb5_newrealm <<EOF
+$MASTER_PASSWORD
+$MASTER_PASSWORD
+EOF
+echo ""
+
+echo "==================================================================================="
+echo "==== Creating default principals in the acl ======================================="
+echo "==================================================================================="
+echo "Adding $KADMIN_PRINCIPAL principal"
+kadmin.local -q "delete_principal -force $KADMIN_PRINCIPAL_FULL"
+echo ""
+kadmin.local -q "addprinc -pw $KADMIN_PASSWORD $KADMIN_PRINCIPAL_FULL"
+echo ""
+
+echo "Adding noPermissions principal"
+kadmin.local -q "delete_principal -force noPermissions@$REALM"
+echo ""
+kadmin.local -q "addprinc -pw $KADMIN_PASSWORD noPermissions@$REALM"
+echo ""
+
+krb5kdc
+kadmind -nofork
+➜  kdc-server git:(master)
+
+➜  kdc-server git:(master) docker-compose up
+Creating network "kdc-server_default" with the default driver
+Building kdc-server
+[+] Building 58.7s (12/12) FINISHED
+ => [internal] load build definition from Dockerfile                       0.0s
+ => => transferring dockerfile: 538B                                       0.0s
+ => [internal] load .dockerignore                                          0.0s
+ => => transferring context: 2B                                            0.0s
+ => [internal] load metadata for docker.io/library/debian:jessie           1.9s
+ => [auth] library/debian:pull token for registry-1.docker.io              0.0s
+ => [1/6] FROM docker.io/library/debian:jessie@sha256:32ad5050caffb2c7e9  16.6s
+ => => resolve docker.io/library/debian:jessie@sha256:32ad5050caffb2c7e96  0.0s
+ => => sha256:32ad5050caffb2c7e969dac873bce2c370015c2256ff984 982B / 982B  0.0s
+ => => sha256:23f6c1ca631220b4a17c659e70e4c20092965590b406b1f 529B / 529B  0.0s
+ => => sha256:3aaeab7a47777b5ca21fc6de40a6f9e7ee7ebb7302e 1.46kB / 1.46kB  0.0s
+ => => sha256:b82b9923b08dfd4c2a83d1669b67a3a0c12f2d17 54.39MB / 54.39MB  13.7s
+ => => extracting sha256:b82b9923b08dfd4c2a83d1669b67a3a0c12f2d17fc989315  2.4s
+ => [internal] load build context                                          0.0s
+ => => transferring context: 3.17kB                                        0.0s
+ => [2/6] RUN apt-get -qq update                                           9.5s
+ => [3/6] RUN apt-get -qq install locales krb5-kdc krb5-admin-server      20.2s
+ => [4/6] RUN apt-get -qq install vim                                      9.3s
+ => [5/6] RUN apt-get -qq clean                                            0.4s
+ => [6/6] COPY init-script.sh /tmp/                                        0.0s
+ => exporting to image                                                     0.6s
+ => => exporting layers                                                    0.6s
+ => => writing image sha256:a00a457fa6fc5e05590e06e7d760d72ef8a4a2eca83f1  0.0s
+ => => naming to docker.io/library/kdc-server_kdc-server                   0.0s
+
+Use 'docker scan' to run Snyk tests against images to find vulnerabilities and learn how to fix them
+WARNING: Image for service kdc-server was built because it did not already exist. To rebuild this image you must use `docker-compose build` or `docker-compose up --build`.
+Creating kdc-server_kdc-server_1 ... done
+Attaching to kdc-server_kdc-server_1
+kdc-server_1  | ===================================================================================
+kdc-server_1  | ==== Kerberos KDC and Kadmin ======================================================
+kdc-server_1  | ===================================================================================
+kdc-server_1  | REALM: EXAMPLE.COM
+kdc-server_1  | KADMIN_PRINCIPAL_FULL: kadmin/admin@EXAMPLE.COM
+kdc-server_1  | KADMIN_PASSWORD: adminpassword
+kdc-server_1  |
+kdc-server_1  | ===================================================================================
+kdc-server_1  | ==== /etc/krb5.conf ===============================================================
+kdc-server_1  | ===================================================================================
+kdc-server_1  | [libdefaults]
+kdc-server_1  | 	default_realm = EXAMPLE.COM
+kdc-server_1  |
+kdc-server_1  | [realms]
+kdc-server_1  | 	EXAMPLE.COM = {
+kdc-server_1  | 		kdc_ports = 88,750
+kdc-server_1  | 		kadmind_port = 749
+kdc-server_1  | 		kdc = kdc-server
+kdc-server_1  | 		admin_server = kdc-server
+kdc-server_1  | 	}
+kdc-server_1  |
+kdc-server_1  | ===================================================================================
+kdc-server_1  | ==== /etc/krb5kdc/kdc.conf ========================================================
+kdc-server_1  | ===================================================================================
+kdc-server_1  | [realms]
+kdc-server_1  | 	EXAMPLE.COM = {
+kdc-server_1  | 		acl_file = /etc/krb5kdc/kadm5.acl
+kdc-server_1  | 		max_renewable_life = 7d 0h 0m 0s
+kdc-server_1  | 		supported_enctypes = aes256-cts-hmac-sha1-96:normal
+kdc-server_1  | 		default_principal_flags = +preauth
+kdc-server_1  | 	}
+kdc-server_1  |
+kdc-server_1  | ===================================================================================
+kdc-server_1  | ==== /etc/krb5kdc/kadm5.acl =======================================================
+kdc-server_1  | ===================================================================================
+kdc-server_1  | kadmin/admin@EXAMPLE.COM *
+kdc-server_1  | noPermissions@EXAMPLE.COM X
+kdc-server_1  |
+kdc-server_1  | ===================================================================================
+kdc-server_1  | ==== Creating realm ===============================================================
+kdc-server_1  | ===================================================================================
+kdc-server_1  | This script should be run on the master KDC/admin server to initialize
+kdc-server_1  | a Kerberos realm.  It will ask you to type in a master key password.
+kdc-server_1  | This password will be used to generate a key that is stored in
+kdc-server_1  | /etc/krb5kdc/stash.  You should try to remember this password, but it
+kdc-server_1  | is much more important that it be a strong password than that it be
+kdc-server_1  | remembered.  However, if you lose the password and /etc/krb5kdc/stash,
+kdc-server_1  | you cannot decrypt your Kerberos database.
+kdc-server_1  | Loading random data
+kdc-server_1  | Initializing database '/etc/krb5kdc/principal' for realm 'EXAMPLE.COM',
+kdc-server_1  | master key name 'K/M@EXAMPLE.COM'
+kdc-server_1  | You will be prompted for the database Master Password.
+kdc-server_1  | It is important that you NOT FORGET this password.
+kdc-server_1  | Enter KDC database master key:
+kdc-server_1  | Re-enter KDC database master key to verify:
+kdc-server_1  | Starting Kerberos KDC: krb5kdc.
+kdc-server_1  | Starting Kerberos administrative servers: kadmind.
+kdc-server_1  |
+kdc-server_1  |
+kdc-server_1  | Now that your realm is set up you may wish to create an administrative
+kdc-server_1  | principal using the addprinc subcommand of the kadmin.local program.
+kdc-server_1  | Then, this principal can be added to /etc/krb5kdc/kadm5.acl so that
+kdc-server_1  | you can use the kadmin program on other computers.  Kerberos admin
+kdc-server_1  | principals usually belong to a single user and end in /admin.  For
+kdc-server_1  | example, if jruser is a Kerberos administrator, then in addition to
+kdc-server_1  | the normal jruser principal, a jruser/admin principal should be
+kdc-server_1  | created.
+kdc-server_1  |
+kdc-server_1  | Don't forget to set up DNS information so your clients can find your
+kdc-server_1  | KDC and admin servers.  Doing so is documented in the administration
+kdc-server_1  | guide.
+kdc-server_1  |
+kdc-server_1  | ===================================================================================
+kdc-server_1  | ==== Creating default principals in the acl =======================================
+kdc-server_1  | ===================================================================================
+kdc-server_1  | Adding kadmin/admin principal
+kdc-server_1  | Authenticating as principal root/admin@EXAMPLE.COM with password.
+kdc-server_1  | Principal "kadmin/admin@EXAMPLE.COM" deleted.
+kdc-server_1  | Make sure that you have removed this principal from all ACLs before reusing.
+kdc-server_1  |
+kdc-server_1  | WARNING: no policy specified for kadmin/admin@EXAMPLE.COM; defaulting to no policy
+kdc-server_1  | Authenticating as principal root/admin@EXAMPLE.COM with password.
+kdc-server_1  | Principal "kadmin/admin@EXAMPLE.COM" created.
+kdc-server_1  |
+kdc-server_1  | Adding noPermissions principal
+kdc-server_1  | delete_principal: Principal does not exist while deleting principal "noPermissions@EXAMPLE.COM"
+kdc-server_1  | Authenticating as principal root/admin@EXAMPLE.COM with password.
+kdc-server_1  |
+kdc-server_1  | WARNING: no policy specified for noPermissions@EXAMPLE.COM; defaulting to no policy
+kdc-server_1  | Authenticating as principal root/admin@EXAMPLE.COM with password.
+kdc-server_1  | Principal "noPermissions@EXAMPLE.COM" created.
+kdc-server_1  |
+kdc-server_1  | kadmind: starting...
+
+
+➜  kerberos-containers git:(master) docker ps
+CONTAINER ID   IMAGE                   COMMAND                  CREATED          STATUS          PORTS                                                                      NAMES
+18e2eb0360c8   kdc-server_kdc-server   "/bin/sh -c /tmp/ini…"   17 minutes ago   Up 17 minutes   0.0.0.0:88->88/udp, :::88->88/udp, 0.0.0.0:749->749/tcp, :::749->749/tcp   kdc-server_kdc-server_1
+
+
+SSH SERVER+CLIENT ( Startup)
+===================
+
+
+➜  kerberos-containers git:(master) cd ssh-container
+➜  ssh-container git:(master) ls
+Dockerfile         docker-compose.yml sshd_config
+README.md          ssh_config
+➜  ssh-container git:(master) cat sshd_config
+# Modified configuration file for allowing GSSAPI authentication
+# See the sshd_config(5) manpage for details
+
+# What ports, IPs and protocols we listen for
+Port 22
+# Use these options to restrict which interfaces/protocols sshd will bind to
+#ListenAddress ::
+#ListenAddress 0.0.0.0
+Protocol 2
+# HostKeys for protocol version 2
+HostKey /etc/ssh/ssh_host_rsa_key
+HostKey /etc/ssh/ssh_host_dsa_key
+HostKey /etc/ssh/ssh_host_ecdsa_key
+HostKey /etc/ssh/ssh_host_ed25519_key
+#Privilege Separation is turned on for security
+UsePrivilegeSeparation no
+
+# Lifetime and size of ephemeral version 1 server key
+KeyRegenerationInterval 3600
+ServerKeyBits 1024
+
+# Logging
+SyslogFacility AUTH
+LogLevel INFO
+
+# Authentication:
+LoginGraceTime 120
+PermitRootLogin without-password
+StrictModes yes
+
+RSAAuthentication yes
+PubkeyAuthentication yes
+#AuthorizedKeysFile	%h/.ssh/authorized_keys
+
+# Don't read the user's ~/.rhosts and ~/.shosts files
+IgnoreRhosts yes
+# For this to work you will also need host keys in /etc/ssh_known_hosts
+RhostsRSAAuthentication no
+# similar for protocol version 2
+HostbasedAuthentication no
+# Uncomment if you don't trust ~/.ssh/known_hosts for RhostsRSAAuthentication
+#IgnoreUserKnownHosts yes
+
+# To enable empty passwords, change to yes (NOT RECOMMENDED)
+PermitEmptyPasswords no
+
+# Change to yes to enable challenge-response passwords (beware issues with
+# some PAM modules and threads)
+ChallengeResponseAuthentication no
+
+# Change to no to disable tunnelled clear text passwords
+#PasswordAuthentication yes
+
+# Kerberos options
+#KerberosAuthentication no
+#KerberosGetAFSToken no
+#KerberosOrLocalPasswd yes
+#KerberosTicketCleanup yes
+
+# GSSAPI options
+GSSAPIAuthentication yes
+GSSAPICleanupCredentials yes
+
+X11Forwarding yes
+X11DisplayOffset 10
+PrintMotd no
+PrintLastLog yes
+TCPKeepAlive yes
+#UseLogin no
+
+#MaxStartups 10:30:60
+#Banner /etc/issue.net
+
+# Allow client to pass locale environment variables
+AcceptEnv LANG LC_*
+
+Subsystem sftp /usr/lib/openssh/sftp-server
+
+# Set this to 'yes' to enable PAM authentication, account processing,
+# and session processing. If this is enabled, PAM authentication will
+# be allowed through the ChallengeResponseAuthentication and
+# PasswordAuthentication.  Depending on your PAM configuration,
+# PAM authentication via ChallengeResponseAuthentication may bypass
+# the setting of "PermitRootLogin without-password".
+# If you just want the PAM account and session checks to run without
+# PAM authentication, then enable this but set PasswordAuthentication
+# and ChallengeResponseAuthentication to 'no'.
+UsePAM yes
+➜  ssh-container git:(master) cat ssh_config
+# This is the ssh client system-wide configuration file.  See
+# ssh_config(5) for more information.  This file provides defaults for
+# users, and the values can be changed in per-user configuration files
+# or on the command line.
+
+# Configuration data is parsed as follows:
+#  1. command line options
+#  2. user-specific file
+#  3. system-wide file
+# Any configuration value is only changed the first time it is set.
+# Thus, host-specific definitions should be at the beginning of the
+# configuration file, and defaults at the end.
+
+# Site-wide defaults for some commonly used options.  For a comprehensive
+# list of available options, their meanings and defaults, please see the
+# ssh_config(5) man page.
+
+Host *
+#   ForwardAgent no
+#   ForwardX11 no
+#   ForwardX11Trusted yes
+#   RhostsRSAAuthentication no
+#   RSAAuthentication yes
+#   PasswordAuthentication yes
+#   HostbasedAuthentication no
+#   GSSAPIAuthentication no
+#   GSSAPIDelegateCredentials no
+#   GSSAPIKeyExchange no
+#   GSSAPITrustDNS no
+#   BatchMode no
+#   CheckHostIP yes
+#   AddressFamily any
+#   ConnectTimeout 0
+#   StrictHostKeyChecking ask
+#   IdentityFile ~/.ssh/identity
+#   IdentityFile ~/.ssh/id_rsa
+#   IdentityFile ~/.ssh/id_dsa
+#   Port 22
+#   Protocol 2,1
+#   Cipher 3des
+#   Ciphers aes128-ctr,aes192-ctr,aes256-ctr,arcfour256,arcfour128,aes128-cbc,3des-cbc
+#   MACs hmac-md5,hmac-sha1,umac-64@openssh.com,hmac-ripemd160
+#   EscapeChar ~
+#   Tunnel no
+#   TunnelDevice any:any
+#   PermitLocalCommand no
+#   VisualHostKey no
+#   ProxyCommand ssh -q -W %h:%p gateway.example.com
+#   RekeyLimit 1G 1h
+    SendEnv LANG LC_*
+    HashKnownHosts yes
+    GSSAPIAuthentication yes
+    GSSAPIDelegateCredentials no
+➜  ssh-container git:(master) cat Dockerfile
+FROM debian:jessie
+
+EXPOSE 22
+
+ENV DEBIAN_FRONTEND noninteractive
+RUN apt-get -qq update
+RUN apt-get -qq install openssh-server
+RUN apt-get -qq install krb5-user
+RUN apt-get -qq install vim
+RUN apt-get -qq clean
+
+# configuration for the SSH server
+COPY sshd_config /etc/ssh/sshd_config
+# configuration for the SSH client
+COPY ssh_config /etc/ssh/ssh_config
+
+➜  ssh-container git:(master) cat docker-compose.yml
+version: "2"
+services:
+  ssh-server:
+    hostname: 'ssh-server'
+    build: .
+    ports:
+      - "2222:22"
+    entrypoint: /usr/sbin/sshd -D
+  ssh-client:
+    hostname: 'ssh-client'
+    build: .
+    entrypoint: /bin/bash
+    stdin_open: true # docker run -i
+    tty: true        # docker run -t
+➜  ssh-container git:(master) docker-compose up
+Creating network "ssh-container_default" with the default driver
+Building ssh-server
+[+] Building 31.1s (14/14) FINISHED
+ => [internal] load build definition from Dockerfile                       0.0s
+ => => transferring dockerfile: 404B                                       0.0s
+ => [internal] load .dockerignore                                          0.0s
+ => => transferring context: 2B                                            0.0s
+ => [internal] load metadata for docker.io/library/debian:jessie           0.8s
+ => [auth] library/debian:pull token for registry-1.docker.io              0.0s
+ => [internal] load build context                                          0.0s
+ => => transferring context: 4.33kB                                        0.0s
+ => [1/8] FROM docker.io/library/debian:jessie@sha256:32ad5050caffb2c7e96  0.0s
+ => CACHED [2/8] RUN apt-get -qq update                                    0.0s
+ => [3/8] RUN apt-get -qq install openssh-server                           9.6s
+ => [4/8] RUN apt-get -qq install krb5-user                               12.7s
+ => [5/8] RUN apt-get -qq install vim                                      7.0s
+ => [6/8] RUN apt-get -qq clean                                            0.3s
+ => [7/8] COPY sshd_config /etc/ssh/sshd_config                            0.0s
+ => [8/8] COPY ssh_config /etc/ssh/ssh_config                              0.0s
+ => exporting to image                                                     0.6s
+ => => exporting layers                                                    0.6s
+ => => writing image sha256:fb2042504c69ad1d0229c245b7148d8b2bd0938f8b029  0.0s
+ => => naming to docker.io/library/ssh-container_ssh-server                0.0s
+
+Use 'docker scan' to run Snyk tests against images to find vulnerabilities and learn how to fix them
+WARNING: Image for service ssh-server was built because it did not already exist. To rebuild this image you must use `docker-compose build` or `docker-compose up --build`.
+Building ssh-client
+[+] Building 0.4s (13/13) FINISHED
+ => [internal] load build definition from Dockerfile                       0.0s
+ => => transferring dockerfile: 37B                                        0.0s
+ => [internal] load .dockerignore                                          0.0s
+ => => transferring context: 2B                                            0.0s
+ => [internal] load metadata for docker.io/library/debian:jessie           0.3s
+ => [1/8] FROM docker.io/library/debian:jessie@sha256:32ad5050caffb2c7e96  0.0s
+ => [internal] load build context                                          0.0s
+ => => transferring context: 63B                                           0.0s
+ => CACHED [2/8] RUN apt-get -qq update                                    0.0s
+ => CACHED [3/8] RUN apt-get -qq install openssh-server                    0.0s
+ => CACHED [4/8] RUN apt-get -qq install krb5-user                         0.0s
+ => CACHED [5/8] RUN apt-get -qq install vim                               0.0s
+ => CACHED [6/8] RUN apt-get -qq clean                                     0.0s
+ => CACHED [7/8] COPY sshd_config /etc/ssh/sshd_config                     0.0s
+ => CACHED [8/8] COPY ssh_config /etc/ssh/ssh_config                       0.0s
+ => exporting to image                                                     0.0s
+ => => exporting layers                                                    0.0s
+ => => writing image sha256:fb2042504c69ad1d0229c245b7148d8b2bd0938f8b029  0.0s
+ => => naming to docker.io/library/ssh-container_ssh-client                0.0s
+
+Use 'docker scan' to run Snyk tests against images to find vulnerabilities and learn how to fix them
+WARNING: Image for service ssh-client was built because it did not already exist. To rebuild this image you must use `docker-compose build` or `docker-compose up --build`.
+Creating ssh-container_ssh-client_1 ... done
+Creating ssh-container_ssh-server_1 ... done
+Attaching to ssh-container_ssh-client_1, ssh-container_ssh-server_1
+
+➜  kerberos-containers git:(master) docker ps
+CONTAINER ID   IMAGE                      COMMAND                  CREATED              STATUS              PORTS                                                                      NAMES
+b02d803dabdf   ssh-container_ssh-client   "/bin/bash"              About a minute ago   Up About a minute   22/tcp                                                                     ssh-container_ssh-client_1
+2a587297998c   ssh-container_ssh-server   "/usr/sbin/sshd -D"      About a minute ago   Up 59 seconds       0.0.0.0:2222->22/tcp, :::2222->22/tcp                                      ssh-container_ssh-server_1
+18e2eb0360c8   kdc-server_kdc-server      "/bin/sh -c /tmp/ini…"   52 minutes ago       Up 52 minutes       0.0.0.0:88->88/udp, :::88->88/udp, 0.0.0.0:749->749/tcp, :::749->749/tcp   kdc-server_kdc-server_1
+
+
+CHECK
+=======
+Login to KDC and verify
+➜  ~ docker exec -it kdc-server_kdc-server_1 /bin/bash
+
+List Principals
+root@kdc-server:/# kadmin.local
+Authenticating as principal root/admin@EXAMPLE.COM with password.
+kadmin.local:  listprincs
+K/M@EXAMPLE.COM
+kadmin/admin@EXAMPLE.COM
+kadmin/changepw@EXAMPLE.COM
+kadmin/kdc-server@EXAMPLE.COM
+krbtgt/EXAMPLE.COM@EXAMPLE.COM
+noPermissions@EXAMPLE.COM
+kadmin.local:
+
+Add the principals for the SSH server and client.
+
+kadmin.local:  addprinc -randkey host/ssh-server@EXAMPLE.COM
+WARNING: no policy specified for host/ssh-server@EXAMPLE.COM; defaulting to no policy
+Principal "host/ssh-server@EXAMPLE.COM" created.
+
+Create the keytab file for the service principal that will need to be placed on the SSH server
+
+kadmin.local:  ktadd -k /sshserver.keytab host/ssh-server@EXAMPLE.COM
+Entry for principal host/ssh-server@EXAMPLE.COM with kvno 2, encryption type aes256-cts-hmac-sha1-96 added to keytab WRFILE:/sshserver.keytab.
+
+Verify added host
+kadmin.local:  listprincs
+K/M@EXAMPLE.COM
+host/ssh-server@EXAMPLE.COM
+kadmin/admin@EXAMPLE.COM
+kadmin/changepw@EXAMPLE.COM
+kadmin/kdc-server@EXAMPLE.COM
+krbtgt/EXAMPLE.COM@EXAMPLE.COM
+noPermissions@EXAMPLE.COM
+kadmin.local:
+
+Add the principal for the (future) user on the SSH server.
+
+kadmin.local:  addprinc -randkey sshuser
+WARNING: no policy specified for sshuser@EXAMPLE.COM; defaulting to no policy
+Principal "sshuser@EXAMPLE.COM" created.
+
+kadmin.local:  ktadd -k /sshuser.keytab sshuser@EXAMPLE.COM
+Entry for principal sshuser@EXAMPLE.COM with kvno 2, encryption type aes256-cts-hmac-sha1-96 added to keytab WRFILE:/sshuser.keytab.
+kadmin.local:
+
+kadmin.local:  listprincs
+K/M@EXAMPLE.COM
+host/ssh-server@EXAMPLE.COM
+kadmin/admin@EXAMPLE.COM
+kadmin/changepw@EXAMPLE.COM
+kadmin/kdc-server@EXAMPLE.COM
+krbtgt/EXAMPLE.COM@EXAMPLE.COM
+noPermissions@EXAMPLE.COM
+sshuser@EXAMPLE.COM
+kadmin.local:
+
+
+Copy the keytab files for server and user
+➜  kerberos cd kerberos-containers
+
+➜  kerberos-containers git:(master) docker cp kdc-server_kdc-server_1:/sshserver.keytab ./sshserver.keytab
+docker cp kdc-server_kdc-server_1:/sshuser.keytab ./sshuser.keytab
+
+➜  kerberos-containers git:(master) ✗ ls
+README.md        kdc-ssh-server   sshserver.keytab
+kdc-server       ssh-container    sshuser.keytab
+➜  kerberos-containers git:(master) ✗
+
+
+To make sure the KDC is able to look up the SSH server container, we will need to create an entry in the /etc/hosts file on the KDC container. We will need to find the IP address of the SSH server container, which can be done from the SSH container or using the handy command below:
+
+➜  kerberos-containers git:(master) ✗ docker inspect -f '{{.Name}} - {{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' $(docker ps -aq)
+
+/ssh-container_ssh-client_1 - 172.21.0.2
+/ssh-container_ssh-server_1 - 172.21.0.3
+/kdc-ssh-server_kdc-ssh-server_1 -
+/kdc-server_kdc-server_1 - 172.18.0.2
+
+root@kdc-server:/# cat /etc/hosts
+127.0.0.1	localhost
+::1	localhost ip6-localhost ip6-loopback
+fe00::0	ip6-localnet
+ff00::0	ip6-mcastprefix
+ff02::1	ip6-allnodes
+ff02::2	ip6-allrouters
+172.18.0.2	kdc-server
+root@kdc-server:/# echo "172.21.0.3  ssh-server" >> /etc/hosts
+root@kdc-server:/# cat /etc/hosts
+127.0.0.1	localhost
+::1	localhost ip6-localhost ip6-loopback
+fe00::0	ip6-localnet
+ff00::0	ip6-mcastprefix
+ff02::1	ip6-allnodes
+ff02::2	ip6-allrouters
+172.18.0.2	kdc-server
+172.21.0.3  ssh-server
+root@kdc-server:/#
+
+
+Configure SSH SERVER(Resource Server) to point to KDC 
+
+root@ssh-server:/# cp /etc/krb5.conf /etc/krb5.conf.old
+root@ssh-server:/# echo '
+ [libdefaults] \
+     default_realm = EXAMPLE.COM \
+     forwardable = TRUE \
+ [realms] \
+     EXAMPLE.COM = { \
+             kdc_ports = 88 \
+             kadmind_port = 749 \
+             kdc = host.docker.internal \
+             admin_server = host.docker.internal \
+     }\
+ [domain_realm] \
+         host.docker.internal = EXAMPLE.COM \
+ > /etc/krb5.conf
+
+
+➜  kerberos-containers git:(master) ✗ docker cp ./sshserver.keytab ssh-container_ssh-server_1:/etc/krb5.keytab
+
+root@ssh-server:/# cat /etc/krb5.conf
+
+[libdefaults]
+    default_realm = EXAMPLE.COM
+    forwardable = TRUE
+[realms]
+    EXAMPLE.COM = {
+            kdc_ports = 88
+            kadmind_port = 749
+            kdc = host.docker.internal
+            admin_server = host.docker.internal
+    }
+[domain_realm]
+        host.docker.internal = EXAMPLE.COM
+
+root@ssh-server:/#
+
+Add a ssh user (sshuser/ssh123)
+
+root@ssh-server:/# adduser sshuser
+Adding user 'sshuser' ...
+Adding new group 'sshuser' (1000) ...
+Adding new user 'sshuser' (1000) with group 'sshuser' ...
+Creating home directory '/home/sshuser' ...
+Copying files from '/etc/skel' ...
+Enter new UNIX password:
+Retype new UNIX password:
+passwd: password updated successfully
+Changing the user information for sshuser
+Enter the new value, or press ENTER for the default
+	Full Name []: SSH DemoUser
+	Room Number []:
+	Work Phone []:
+	Home Phone []:
+	Other []:
+Is the information correct? [Y/n] y
+root@ssh-server:/#
+
+Test ssh user test ssh session
+
+root@ssh-server:/# ssh sshuser@localhost
+The authenticity of host 'localhost (127.0.0.1)' can't be established.
+ECDSA key fingerprint is f5:5b:5c:dd:63:f8:29:e5:09:a7:0b:39:96:5d:64:b8.
+Are you sure you want to continue connecting (yes/no)? yes
+Warning: Permanently added 'localhost' (ECDSA) to the list of known hosts.
+sshuser@localhost's password:
+
+The programs included with the Debian GNU/Linux system are free software;
+the exact distribution terms for each program are described in the
+individual files in /usr/share/doc/*/copyright.
+
+Debian GNU/Linux comes with ABSOLUTELY NO WARRANTY, to the extent
+permitted by applicable law.
+sshuser@ssh-server:~$
+
+
+SSH port 22 of ssh server is mapped to 2222 of host. So test sshuser test session from host.
+
+➜  kerberos-containers git:(master) ✗ ssh sshuser@localhost -p 2222
+The authenticity of host '[localhost]:2222 ([::1]:2222)' can't be established.
+ECDSA key fingerprint is SHA256:30bGNqY3aX/S7N7Wz1zd8sw6hIr4UhhLx6RRnyrio68.
+Are you sure you want to continue connecting (yes/no/[fingerprint])? yes
+Warning: Permanently added '[localhost]:2222' (ECDSA) to the list of known hosts.
+sshuser@localhost's password:
+Permission denied, please try again.
+sshuser@localhost's password:
+
+The programs included with the Debian GNU/Linux system are free software;
+the exact distribution terms for each program are described in the
+individual files in /usr/share/doc/*/copyright.
+
+Debian GNU/Linux comes with ABSOLUTELY NO WARRANTY, to the extent
+permitted by applicable law.
+Last login: Wed Oct 27 17:36:42 2021 from localhost
+'''
+
+Add SSH Server address to ssh client
+root@ssh-client:/# echo "172.21.0.3  ssh-server" >> /etc/hosts
+root@ssh-client:/# cat /etc/hosts
+127.0.0.1	localhost
+::1	localhost ip6-localhost ip6-loopback
+fe00::0	ip6-localnet
+ff00::0	ip6-mcastprefix
+ff02::1	ip6-allnodes
+ff02::2	ip6-allrouters
+172.21.0.2	ssh-client
+172.21.0.3  ssh-server
+root@ssh-client:/#
+
+Test SSH user test session to the sshserver
+
+root@ssh-client:/# ssh sshuser@ssh-server
+The authenticity of host 'ssh-server (172.21.0.3)' can't be established.
+ECDSA key fingerprint is f5:5b:5c:dd:63:f8:29:e5:09:a7:0b:39:96:5d:64:b8.
+Are you sure you want to continue connecting (yes/no)? yes
+Warning: Permanently added 'ssh-server,172.21.0.3' (ECDSA) to the list of known hosts.
+sshuser@ssh-server's password:
+
+The programs included with the Debian GNU/Linux system are free software;
+the exact distribution terms for each program are described in the
+individual files in /usr/share/doc/*/copyright.
+
+Debian GNU/Linux comes with ABSOLUTELY NO WARRANTY, to the extent
+permitted by applicable law.
+Last login: Wed Oct 27 17:38:46 2021 from 172.21.0.1
+sshuser@ssh-server:~$
+
+
+Add krb5 config for the ssh-client
+echo ' \
+[libdefaults] 
+    default_realm = EXAMPLE.COM 
+    forwardable = TRUE 
+[realms] 
+    EXAMPLE.COM = { 
+            kdc_ports = 88 
+            kadmind_port = 749 
+            kdc = host.docker.internal 
+            admin_server = host.docker.internal 
+    } 
+[domain_realm] 
+        host.docker.internal = EXAMPLE.COM 
+' > /etc/krb5.conf
+root@ssh-client:/# cat /etc/krb5.conf
+[libdefaults]
+    default_realm = EXAMPLE.COM
+    forwardable = TRUE
+[realms]
+    EXAMPLE.COM = {
+            kdc_ports = 88
+            kadmind_port = 749
+            kdc = host.docker.internal
+            admin_server = host.docker.internal
+    }
+[domain_realm]
+    host.docker.internal = EXAMPLE.COM
+
+Copy the sshuser keytab file to the ssh-client 
+
+➜  kerberos-containers git:(master) ✗ docker cp ./sshuser.keytab ssh-container_ssh-client_1:/sshuser.keytab
+
+kinit the user at the ssh-client
+root@ssh-client:/# kinit sshuser -k -t sshuser.keytab
+
+List the kerberos details at the ssh-client
+
+root@ssh-client:/# klist
+Ticket cache: FILE:/tmp/krb5cc_0
+Default principal: sshuser@EXAMPLE.COM
+
+Valid starting     Expires            Service principal
+10/27/21 18:14:07  10/28/21 18:14:06  krbtgt/EXAMPLE.COM@EXAMPLE.COM
+
+Now, Test the passwordless ssh session by sshuser from ssh-client to ssh-server
+
+root@ssh-client:/# ssh sshuser@ssh-server
+
+The programs included with the Debian GNU/Linux system are free software;
+the exact distribution terms for each program are described in the
+individual files in /usr/share/doc/*/copyright.
+
+Debian GNU/Linux comes with ABSOLUTELY NO WARRANTY, to the extent
+permitted by applicable law.
+Last login: Wed Oct 27 18:05:27 2021 from ssh-container_ssh-client_1.ssh-container_default
+sshuser@ssh-server:~$
+
